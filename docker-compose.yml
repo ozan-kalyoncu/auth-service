@@ -1,0 +1,83 @@
+# One command -- `docker compose up` -- brings up Postgres, Redis and the API.
+#
+# The datastores publish their ports to the host so the app can also be run
+# locally with `npm run dev` against the same containers.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: auth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+      POSTGRES_DB: auth
+    ports:
+      # Host port 5433, not 5432, so this stack can run alongside another local
+      # Postgres (the E-commerce Admin API uses the default port). Inside the
+      # compose network the port is still 5432 -- only the host mapping shifts.
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      # Named volume, so data survives `docker compose down` (but not `down -v`).
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The app's `depends_on` waits for this to pass. Without a healthcheck,
+      # "container started" only means the process launched -- Postgres takes a
+      # few more seconds to accept connections, and the API would crash on boot.
+      test: ['CMD-SHELL', 'pg_isready -U auth -d auth']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: auth-redis
+    restart: unless-stopped
+    ports:
+      # Shifted off the default 6379 for the same reason as Postgres above.
+      - '${REDIS_PORT:-6380}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      target: runtime
+    container_name: auth-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      # Inside the compose network, services reach each other by service name.
+      DATABASE_URL: postgresql://auth:auth@postgres:5432/auth?schema=public
+      REDIS_URL: redis://redis:6379
+      # Values come from the host's .env (compose substitutes ${VAR}), so real
+      # secrets never live in this committed file.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+      JWT_ISSUER: ${JWT_ISSUER:-auth-service}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-auth-service-clients}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - '${PORT:-3000}:3000'
+    # Migrations run at container start rather than during the image build: a
+    # build has no database to talk to, and the same image must be deployable to
+    # any environment.
+    command: sh -c "npx prisma migrate deploy && node dist/server.js"
+
+volumes:
+  postgres-data:
+  redis-data:

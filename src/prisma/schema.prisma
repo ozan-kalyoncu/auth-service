@@ -1,0 +1,110 @@
+// Prisma schema for the auth service.
+//
+// Run `npm run prisma:migrate` to turn changes here into a SQL migration, and
+// `npm run prisma:generate` to regenerate the typed client used by the services.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+// Prisma 7 no longer takes the connection URL here. The CLI reads it from
+// prisma.config.ts, and the running app supplies it through a driver adapter
+// (see src/lib/prisma.ts) -- which means the app talks to Postgres through the
+// ordinary `pg` driver instead of a bundled Rust engine.
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id String @id @default(cuid())
+
+  email String @unique
+
+  // Nullable on purpose: an account created through Google/GitHub has no password
+  // at all. Making this required would force us to invent a fake password for
+  // OAuth users, which is worse than modelling "this user has no password" honestly.
+  passwordHash String?
+
+  role            Role    @default(USER)
+  isEmailVerified Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  oauthAccounts OAuthAccount[]
+  refreshTokens RefreshToken[]
+  loginAttempts LoginAttempt[]
+}
+
+enum Role {
+  USER
+  ADMIN
+  SUPERADMIN
+}
+
+// One row per external identity linked to a User. This is what makes account
+// linking possible: the same person can sign in with a password AND Google AND
+// GitHub while remaining a single User row, instead of ending up with three
+// duplicate accounts that share an email address.
+model OAuthAccount {
+  id             String @id @default(cuid())
+  provider       String // "google" | "github"
+  providerUserId String // the ID that provider assigns to this user
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  // Guarantees one provider identity maps to at most one user, so a second login
+  // through the same Google account can never silently create a new User.
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+// Refresh tokens are never stored in plaintext -- only a SHA-256 hash of the token.
+// If the database ever leaks, the hashes alone cannot be replayed against the API,
+// exactly like password hashes. The raw token exists only in the client's cookie.
+model RefreshToken {
+  id        String @id @default(cuid())
+  tokenHash String @unique
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+  revokedAt DateTime?
+
+  // Rotation chain: when a token is spent we mark it revoked and point replacedBy
+  // at the token that succeeded it. Because the old row survives, a second use of
+  // an already-rotated token is detectable -- that is the signal a refresh token
+  // was stolen, and it lets us revoke the whole chain instead of trusting the thief.
+  replacedBy String?
+
+  createdAt DateTime @default(now())
+
+  // Logout and "revoke every session for this user" both scan by userId.
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// Every login attempt, successful or not. Rate limiting itself lives in Redis
+// (fast, expiring counters), but this table is the durable audit trail: it answers
+// "was this account under attack last Tuesday?", which a Redis counter cannot.
+model LoginAttempt {
+  id String @id @default(cuid())
+
+  // Nullable because a login attempt for an email that does not exist still needs
+  // to be recorded -- those are precisely the attempts worth watching.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  ip      String
+  success Boolean
+
+  createdAt DateTime @default(now())
+
+  @@index([ip, createdAt])
+  @@index([userId, createdAt])
+}

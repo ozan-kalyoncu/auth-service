@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+
+# Prisma client is generated from schema.prisma at install/build time, so it is
+# build output, not source. Run `npm run prisma:generate` after cloning.
+src/generated/
+
+# Secrets never get committed -- only .env.example, which holds the shape of the
+# config with placeholder values.
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/

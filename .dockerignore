@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+# Regenerated inside the build stage; never copy the host's copy in.
+src/generated
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+tests
+README.md
+CLAUDE.md
