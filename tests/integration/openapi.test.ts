@@ -25,6 +25,9 @@ describe('GET /api/v1/openapi.json', () => {
       '/auth/verify-email',
       '/health/live',
       '/health/ready',
+      '/users',
+      '/users/{id}',
+      '/users/{id}/role',
     ]);
   });
 

@@ -52,10 +52,11 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Auth Service API',
-    version: '0.3.0',
+    version: '0.4.0',
     description:
       'Authentication and authorization service. Short-lived JWT access tokens paired with ' +
-      'rotating, revocable refresh tokens that detect reuse.',
+      'rotating, revocable refresh tokens that detect reuse, plus permission-based access ' +
+      'control.',
   },
   servers: [{ url: '/api/v1' }],
 
@@ -76,6 +77,17 @@ export const openApiDocument = {
       },
       Unauthorized: {
         description: 'Missing, malformed, expired or invalid credentials',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+      },
+      // 403, not 401: we know exactly who the caller is, and the answer is still
+      // no. Returning 401 here would send clients into a pointless
+      // refresh-and-retry loop that can never succeed.
+      Forbidden: {
+        description: 'Authenticated, but lacking the required permission',
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+      },
+      NotFound: {
+        description: 'No such resource',
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
       },
     },
@@ -352,11 +364,86 @@ export const openApiDocument = {
     '/auth/me': {
       get: {
         tags: ['Auth'],
-        summary: 'Return the authenticated user',
+        summary: 'Return the authenticated user and their permissions',
         security: [{ bearerAuth: [] }],
         responses: {
           200: {
             description: 'The current user',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    user: { $ref: '#/components/schemas/PublicUser' },
+                    permissions: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description:
+                        'What this caller may do. For rendering UI only -- enforcement is ' +
+                        'server-side, in middleware.',
+                      example: ['users:read'],
+                    },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+
+    '/users': {
+      get: {
+        tags: ['Users'],
+        summary: 'List users',
+        description:
+          'Requires the users:read permission (ADMIN and above) and a verified email address. ' +
+          'Paginated, with limit capped at 100 server-side.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          {
+            name: 'limit',
+            in: 'query',
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+          },
+          { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0, default: 0 } },
+        ],
+        responses: {
+          200: {
+            description: 'A page of users',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    users: { type: 'array', items: { $ref: '#/components/schemas/PublicUser' } },
+                    total: { type: 'integer' },
+                    limit: { type: 'integer' },
+                    offset: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+        },
+      },
+    },
+
+    '/users/{id}': {
+      get: {
+        tags: ['Users'],
+        summary: 'Read one user',
+        description:
+          'Allowed if the id is your own, or if you hold users:read. Ownership is a ' +
+          'relationship between actor and resource, which a role alone cannot express.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          200: {
+            description: 'The user',
             content: {
               'application/json': {
                 schema: {
@@ -367,6 +454,66 @@ export const openApiDocument = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+
+      delete: {
+        tags: ['Users'],
+        summary: 'Delete a user',
+        description:
+          'Requires users:delete (SUPERADMIN). Refresh tokens and linked OAuth accounts ' +
+          'cascade with the row. You cannot delete your own account here.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          204: { description: 'Deleted' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
+        },
+      },
+    },
+
+    '/users/{id}/role': {
+      patch: {
+        tags: ['Users'],
+        summary: "Change a user's role",
+        description:
+          'Requires users:manage-roles (SUPERADMIN). Changing a role revokes that user\'s ' +
+          'refresh tokens, so their old role cannot outlive the current access token. ' +
+          'Changing your own role is refused, to prevent locking the organisation out.',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['role'],
+                properties: { role: { type: 'string', enum: ['USER', 'ADMIN', 'SUPERADMIN'] } },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Updated user',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { user: { $ref: '#/components/schemas/PublicUser' } },
+                },
+              },
+            },
+          },
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          403: { $ref: '#/components/responses/Forbidden' },
+          404: { $ref: '#/components/responses/NotFound' },
         },
       },
     },

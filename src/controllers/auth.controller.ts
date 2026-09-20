@@ -8,6 +8,7 @@ import { requireUser } from '../middleware/authenticate.js';
 import { AppError } from '../lib/app-error.js';
 import { clearRefreshTokenCookie, setRefreshTokenCookie } from '../lib/cookies.js';
 import { REFRESH_TOKEN_COOKIE } from '../config/constants.js';
+import { permissionsForRole } from '../config/permissions.js';
 import { env } from '../config/env.js';
 import type { LoginInput, RegisterInput } from '../validators/auth.validators.js';
 
@@ -158,5 +159,12 @@ export async function getCurrentUser(req: Request, res: Response): Promise<void>
     throw AppError.unauthorized('Account no longer exists');
   }
 
-  res.status(200).json({ user: toPublicUser(user) });
+  // The caller's permissions ship alongside the user so a client can decide what
+  // to render without hardcoding its own copy of the role→capability table and
+  // then drifting from this one. It is a convenience for the UI, never the
+  // enforcement point -- that is the middleware, on the server.
+  res.status(200).json({
+    user: toPublicUser(user),
+    permissions: permissionsForRole(user.role),
+  });
 }

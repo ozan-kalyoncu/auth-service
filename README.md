@@ -4,8 +4,9 @@ A standalone authentication and authorization microservice — the kind of share
 service other applications authenticate against, rather than a login form attached to one
 frontend. API-only: Postman, curl, or Swagger UI is the interface.
 
-**Status:** Milestones 1–3 of 8 complete — scaffold, email/password auth with JWT issuing,
-and rotating refresh tokens with reuse detection and revocation. See [Roadmap](#roadmap).
+**Status:** Milestones 1–4 of 8 complete — scaffold, email/password auth with JWT issuing,
+rotating refresh tokens with reuse detection, and permission-based access control.
+See [Roadmap](#roadmap).
 
 ---
 
@@ -157,6 +158,7 @@ src/
 ├── validators/   Zod request schemas
 ├── docs/         OpenAPI document
 ├── types/        Express request augmentation (req.user)
+├── scripts/      operator CLI (set-role)
 ├── generated/    Prisma client output (gitignored — regenerated from the schema)
 ├── app.ts        builds the Express app (no listening — this is what tests import)
 └── server.ts     connects dependencies, listens, handles graceful shutdown
@@ -217,6 +219,7 @@ npm run dev                     # tsx watch — restarts on file change
 | `npm run prisma:migrate` | Create + apply a migration (development) |
 | `npm run prisma:deploy` | Apply existing migrations (production) |
 | `npm run prisma:studio` | Browse the database in a GUI |
+| `npm run set-role -- <email> <ROLE>` | Promote or demote a user (see [Access control](#access-control)) |
 
 ---
 
@@ -239,7 +242,11 @@ Postman or Insomnia. Swagger UI is mounted on top of it in milestone 7.
 | `POST` | `/api/v1/auth/logout-all` | Bearer | Revoke every session for the account. |
 | `GET` | `/api/v1/auth/verify-email` | — | Confirm an address using the token from the emailed link. Single-use. |
 | `POST` | `/api/v1/auth/resend-verification` | — | Request a fresh verification link. |
-| `GET` | `/api/v1/auth/me` | Bearer | The authenticated user. |
+| `GET` | `/api/v1/auth/me` | Bearer | The authenticated user and their permissions. |
+| `GET` | `/api/v1/users` | `users:read` | List users, paginated. |
+| `GET` | `/api/v1/users/:id` | Self or `users:read` | Read one user. |
+| `PATCH` | `/api/v1/users/:id/role` | `users:manage-roles` | Change a user's role. |
+| `DELETE` | `/api/v1/users/:id` | `users:delete` | Delete a user. |
 | `GET` | `/api/v1/openapi.json` | — | OpenAPI 3.1 description of everything above. |
 
 ### Walking the full flow
@@ -320,6 +327,101 @@ microseconds. That gap alone leaks which addresses exist, so the unknown-email p
 verifies against a throwaway hash to spend the same time
 ([`src/lib/password.ts`](src/lib/password.ts)).
 
+## Access control
+
+Routes declare the **capability** they need, not the role they expect. The tempting
+shortcut — `if (user.role === 'ADMIN')` scattered through handlers — survives exactly
+until the fourth role arrives, at which point "who may list users?" has to be re-answered
+at every one of those sites, and the only way to find them is to grep.
+
+| Permission | `USER` | `ADMIN` | `SUPERADMIN` |
+| --- | :---: | :---: | :---: |
+| `users:read` | | ✓ | ✓ |
+| `users:manage-roles` | | | ✓ |
+| `users:delete` | | | ✓ |
+
+Higher roles are built by spreading the lower set, so inheritance is literal rather than
+implied by a comparison like `role >= ADMIN`. Ordering roles on a number line works right
+up to the first role that is not *more* powerful, merely *different* — a support agent who
+may read users but never delete one does not fit anywhere on that line.
+
+**Designed to outgrow this table.** The map in
+[`src/config/permissions.ts`](src/config/permissions.ts) is static because static is
+enough today and costs no query. Moving to customer-defined roles means replacing
+`permissionsForRole` with a lookup over `Role`/`Permission`/`RolePermission` tables. Every
+call site keeps asking the same question — "does this actor have `users:read`?" — so
+nothing outside that one file changes. Routing all checks through a single function now,
+before there is a reason to, is what makes that swap cheap later.
+
+### The guard stack
+
+```
+authenticate          who are you?            401 if unanswerable
+requireVerifiedEmail  is your address real?   403
+requirePermission     may you do this?        403
+validate              is the input sane?      400
+controller            do it
+```
+
+Order is load-bearing, not cosmetic:
+
+- **Authentication precedes authorization** — "may you" is unanswerable until "who are
+  you" is settled.
+- **Validation comes last of the guards.** A 400 handed to an unauthorized caller confirms
+  which fields and formats the endpoint expects. They get a 403 instead, which tells them
+  nothing. (The one exception is `/users/:id`, where the param is validated first because
+  the ownership guard compares it against the caller's id.)
+- **These run as middleware, not inside handlers.** A forbidden request never reaches
+  business logic, the guard is visible in the route definition, and it cannot be forgotten
+  halfway down a handler that later grew a second branch.
+
+**401 vs 403 is a real distinction.** 401 means "I do not know who you are — authenticate
+and retry"; 403 means "I know exactly who you are, and the answer is still no." Returning
+401 for the second sends clients into a refresh-and-retry loop that can never succeed.
+
+**Ownership is not a role.** "You may always read yourself" is a relationship between
+actor and resource, which no role table can express.
+[`requireSelfOrPermission`](src/middleware/authorize.ts) keeps that rule in one place
+instead of having it reinvented, slightly differently, in each controller. It returns the
+same 403 for a forbidden record and a non-existent one, so an unprivileged caller cannot
+use the difference between 403 and 404 to discover which ids exist.
+
+### Changing a role revokes the user's sessions
+
+`role` travels inside the access token so authorization needs no database lookup — which
+means a demoted admin keeps admin rights inside any token already issued. Revoking their
+refresh tokens cannot claw those back, but it stops them being renewed, so the stale
+privilege window closes at the access token's TTL (15 minutes) rather than the refresh
+token's (7 days).
+
+Shrinking it further means checking the role per request — exactly the round trip the
+stateless token exists to avoid. Fifteen minutes of stale privilege is the price of that
+speed, and it is a choice, not an oversight. There is a test asserting the behaviour
+rather than pretending otherwise.
+
+Self-demotion and self-deletion are both refused: the last superadmin dropping to `USER`
+is how an organisation locks itself out of its own admin tooling.
+
+### Creating the first admin
+
+Changing a role requires `users:manage-roles`, which only a `SUPERADMIN` has — and a fresh
+database has none. Something outside the HTTP API has to break that cycle:
+
+```bash
+npm run set-role -- you@example.com SUPERADMIN
+# => you@example.com: USER -> SUPERADMIN (0 session(s) revoked)
+```
+
+Deliberately a manual operator action rather than a seed that runs at startup: an
+auto-created admin with a known address is a backdoor in every environment it reaches.
+
+Inside Docker, call the compiled script directly — the runtime image installs production
+dependencies only, so `tsx` is not present:
+
+```bash
+docker compose exec app node dist/scripts/set-role.js you@example.com SUPERADMIN
+```
+
 ### Error format
 
 Every failure — validation, auth, 404, unexpected crash — returns the same shape:
@@ -375,6 +477,11 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 | Rotation on every use, with reuse escalating to full account revocation | [`src/services/refresh-token.service.ts`](src/services/refresh-token.service.ts) |
 | Rotation is transactional, with a guard against concurrent double-spend | [`src/services/refresh-token.service.ts`](src/services/refresh-token.service.ts) |
 | Refresh token kept out of JS reach: httpOnly, SameSite=Strict, path-scoped | [`src/lib/cookies.ts`](src/lib/cookies.ts) |
+| Authorization checked in middleware, before any business logic runs | [`src/middleware/authorize.ts`](src/middleware/authorize.ts) |
+| Role changes revoke the target's sessions, bounding stale privilege | [`src/services/user-admin.service.ts`](src/services/user-admin.service.ts) |
+| Self-demotion and self-deletion refused, to prevent admin lockout | [`src/services/user-admin.service.ts`](src/services/user-admin.service.ts) |
+| List endpoints paginated with a server-enforced ceiling | [`src/validators/user.validators.ts`](src/validators/user.validators.ts) |
+| Unprivileged callers cannot distinguish 403 from 404 to probe for ids | [`src/middleware/authorize.ts`](src/middleware/authorize.ts) |
 | Unknown request fields stripped before reaching Prisma (no `role` injection) | [`src/middleware/validate.ts`](src/middleware/validate.ts) |
 | Every login attempt recorded for the audit trail | [`src/services/auth.service.ts`](src/services/auth.service.ts) |
 | Email links built from configured `APP_BASE_URL`, never the `Host` header | [`src/config/env.ts`](src/config/env.ts) |
@@ -395,7 +502,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ```bash
 docker compose up -d postgres redis   # the suite needs real datastores
-npm test                              # 72 tests
+npm test                              # 99 tests
 ```
 
 Tests run against a real Postgres, not a mocked Prisma client, because the behaviour most
@@ -424,7 +531,13 @@ The suite targets failure paths, not just happy ones. Currently covered:
 - Logout: idempotent, scoped to one session, and honest about the access token staying
   valid until it expires; `logout-all` requires a real access token, not just a cookie
 
-Rate-limit tripping and wrong-role rejection join the list as those milestones land.
+- Access control: unauthenticated gets 401 while under-privileged gets 403, an admin
+  refused a superadmin-only action, an unverified admin refused outright, 403 returned
+  ahead of 400 so the schema is not disclosed, role change killing the target's sessions,
+  self-demotion and self-deletion blocked, and deletion cascading to refresh tokens while
+  the login audit trail survives
+
+Rate-limit tripping joins the list when milestone 6 lands.
 
 ---
 
@@ -433,7 +546,7 @@ Rate-limit tripping and wrong-role rejection join the list as those milestones l
 - [x] **1. Scaffold** — Express + TypeScript + Prisma + Redis + Docker Compose, health checks, error handling
 - [x] **2. Email/password auth** — register, login, JWT issuing, email verification (stubbed mailer)
 - [x] **3. Refresh token rotation** — reuse detection, logout, revocation
-- [ ] **4. RBAC** — role middleware, protected example routes
+- [x] **4. RBAC** — permission middleware, protected user-management routes
 - [ ] **5. OAuth2** — Google + GitHub, account linking
 - [ ] **6. Rate limiting** — per-IP and per-account, brute-force protection
 - [ ] **7. Docs** — OpenAPI spec + auth flow diagram

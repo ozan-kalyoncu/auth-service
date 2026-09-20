@@ -57,3 +57,59 @@ export function markEmailVerified(userId: string): Promise<User> {
     data: { isEmailVerified: true },
   });
 }
+
+export interface ListUsersOptions {
+  limit: number;
+  offset: number;
+}
+
+export interface UserPage {
+  users: PublicUser[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/**
+ * Lists users for the admin endpoints.
+ *
+ * Paginated with a hard ceiling on `limit` (enforced by the validator), because
+ * an unbounded list endpoint is a denial-of-service waiting to happen: one
+ * request for every row loads the whole table into memory and serialises it.
+ * The total is returned alongside so a client can render page counts without a
+ * second call.
+ */
+export async function listUsers(options: ListUsersOptions): Promise<UserPage> {
+  const [users, total] = await Promise.all([
+    prisma.user.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: options.limit,
+      skip: options.offset,
+    }),
+    prisma.user.count(),
+  ]);
+
+  return {
+    users: users.map(toPublicUser),
+    total,
+    limit: options.limit,
+    offset: options.offset,
+  };
+}
+
+export function updateUserRole(userId: string, role: Role): Promise<User> {
+  return prisma.user.update({ where: { id: userId }, data: { role } });
+}
+
+/**
+ * Deletes a user.
+ *
+ * Their refresh tokens and OAuth links go with them: the schema declares
+ * `onDelete: Cascade`, so the database removes those rows in the same statement
+ * rather than leaving orphans behind if application code forgets. LoginAttempt
+ * rows use SetNull instead -- the audit trail of a deleted account is still
+ * worth keeping.
+ */
+export function deleteUser(userId: string): Promise<User> {
+  return prisma.user.delete({ where: { id: userId } });
+}
