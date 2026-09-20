@@ -16,14 +16,18 @@ export const emailSchema = z
  *
  * Composition rules ("must contain a symbol") push people toward predictable
  * patterns like `Password1!` while barely increasing the search space; length
- * increases it exponentially. The upper bound is not cosmetic either -- bcrypt
- * silently truncates at 72 bytes, and unbounded input makes the hash itself a
- * DoS vector, since hashing is intentionally slow.
+ * increases it exponentially. Current NIST guidance says to require length and
+ * drop the composition rules, which is what this does.
+ *
+ * The upper bound is not cosmetic: Argon2 hashing is intentionally slow and
+ * memory-hungry, so an unbounded password body turns the hash itself into a DoS
+ * vector. (Argon2 has no inherent input limit -- bcrypt's famous 72-byte
+ * truncation does not apply here -- so 128 is our choice, not the algorithm's.)
  */
 export const passwordSchema = z
   .string()
   .min(12, 'Password must be at least 12 characters')
-  .max(72, 'Password must be at most 72 characters');
+  .max(128, 'Password must be at most 128 characters');
 
 /** cuid() is what every model's primary key uses, so route params are checked against it. */
 export const cuidSchema = z.cuid('Must be a valid id');

@@ -29,3 +29,11 @@ export const REFRESH_TOKEN_COOKIE = 'refresh_token';
 
 /** Path the refresh cookie is scoped to, so it is not sent on every single request. */
 export const REFRESH_TOKEN_COOKIE_PATH = '/api/v1/auth';
+
+/**
+ * How long an email verification link stays valid.
+ *
+ * Long enough that someone can finish the flow the next morning, short enough
+ * that a link sitting in an abandoned inbox does not stay usable forever.
+ */
+export const EMAIL_VERIFICATION_TTL_SECONDS = 60 * 60 * 24;

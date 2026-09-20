@@ -1,3 +1,5 @@
+import { TEST_DATABASE_URL, TEST_REDIS_URL } from './test-env.js';
+
 /**
  * Runs before every test file.
  *
@@ -8,8 +10,7 @@
 process.env.NODE_ENV = 'test';
 process.env.JWT_ACCESS_SECRET ??= 'test-access-secret-that-is-long-enough-32';
 process.env.JWT_REFRESH_SECRET ??= 'test-refresh-secret-that-is-long-enough-32';
-// Separate database and Redis logical DB from development, so running the suite
-// never wipes data being used by hand in Postman.
-process.env.DATABASE_URL ??= 'postgresql://auth:auth@localhost:5433/auth_test?schema=public';
-process.env.REDIS_URL ??= 'redis://localhost:6380/1';
+process.env.DATABASE_URL = TEST_DATABASE_URL;
+process.env.REDIS_URL = TEST_REDIS_URL;
+process.env.APP_BASE_URL = 'http://localhost:3000';
 process.env.LOG_LEVEL = 'silent';

@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { healthRouter } from './health.routes.js';
+import { authRouter } from './auth.routes.js';
+import { openApiDocument } from '../docs/openapi.js';
 
 /**
  * Every route is mounted under a version prefix (/api/v1) from day one.
@@ -12,7 +14,13 @@ import { healthRouter } from './health.routes.js';
 export const apiRouter: Router = Router();
 
 apiRouter.use('/health', healthRouter);
+apiRouter.use('/auth', authRouter);
+
+// The machine-readable API contract. Served as plain JSON for now so it can be
+// imported into Postman or Insomnia; milestone 7 renders it with Swagger UI.
+apiRouter.get('/openapi.json', (_req, res) => {
+  res.status(200).json(openApiDocument);
+});
 
 // Mounted here as milestones land:
-//   apiRouter.use('/auth', authRouter);   // milestones 2-3
 //   apiRouter.use('/users', userRouter);  // milestone 4

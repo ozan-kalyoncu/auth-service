@@ -29,6 +29,12 @@ const envSchema = z.object({
   JWT_ISSUER: z.string().default('auth-service'),
   JWT_AUDIENCE: z.string().default('auth-service-clients'),
 
+  // Public base URL of this service, used to build links that land in emails
+  // (verification, and password reset later). It cannot be derived from the
+  // request host: that header is attacker-controlled, and trusting it lets
+  // someone request a verification email containing a link to their own domain.
+  APP_BASE_URL: z.url().default('http://localhost:3000'),
+
   // Stored in .env as a comma-separated string; transformed into an array here so
   // no consumer has to remember the encoding.
   CORS_ORIGINS: z

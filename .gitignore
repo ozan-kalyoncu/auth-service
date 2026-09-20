@@ -12,6 +12,10 @@ src/generated/
 .env.*
 !.env.example
 
+# Personal study notes for this codebase -- useful locally, not part of the
+# deliverable an interviewer reviews.
+LEARNING.md
+
 *.log
 npm-debug.log*
 .DS_Store

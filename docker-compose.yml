@@ -71,6 +71,7 @@ services:
       JWT_ISSUER: ${JWT_ISSUER:-auth-service}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-auth-service-clients}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
     ports:
       - '${PORT:-3000}:3000'
     # Migrations run at container start rather than during the image build: a
