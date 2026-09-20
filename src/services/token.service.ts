@@ -3,9 +3,9 @@ import { env } from '../config/env.js';
 import type { UserModel as User } from '../generated/prisma/models.js';
 
 /**
- * Token issuing lives behind a service rather than being called straight from the
- * controller, so milestone 3 can add refresh-token rotation in one place instead
- * of editing every endpoint that hands out credentials.
+ * Token issuing lives behind a service rather than being called straight from
+ * the controller, so there is exactly one place that decides what a freshly
+ * authenticated session receives -- used by login and by refresh alike.
  */
 export interface IssuedTokens {
   accessToken: string;
@@ -14,22 +14,20 @@ export interface IssuedTokens {
   expiresIn: number;
 }
 
-export function issueTokens(user: User): IssuedTokens {
+export function issueAccessToken(user: User): IssuedTokens {
   return {
     accessToken: signAccessToken(user.id, user.role),
     tokenType: 'Bearer',
     expiresIn: parseDurationToSeconds(env.JWT_ACCESS_TTL),
   };
-
-  // Milestone 3 extends this to also mint a rotating refresh token, persist its
-  // hash, and set it as an httpOnly cookie.
 }
 
 /**
  * Converts the "15m" / "7d" duration strings used in config into seconds.
  *
  * jsonwebtoken accepts those strings directly for signing, but the client needs a
- * number it can count down, so the same value is parsed once here.
+ * number it can count down, and the refresh-token table needs a concrete expiry
+ * date, so the same value is parsed once here.
  */
 export function parseDurationToSeconds(duration: string): number {
   const match = /^(\d+)\s*(s|m|h|d)$/.exec(duration.trim());

@@ -5,7 +5,13 @@ import { buildDuplicateRegistrationEmail, sendEmail } from '../lib/mailer.js';
 import { logger } from '../lib/logger.js';
 import { createUserWithPassword, findUserByEmail, markEmailVerified } from './user.service.js';
 import { consumeVerificationToken, sendVerificationEmail } from './verification.service.js';
-import { issueTokens, type IssuedTokens } from './token.service.js';
+import { issueAccessToken, type IssuedTokens } from './token.service.js';
+import {
+  issueRefreshToken,
+  revokeAllUserTokens,
+  revokeRefreshToken,
+  rotateRefreshToken,
+} from './refresh-token.service.js';
 import { toPublicUser, type PublicUser } from './user.service.js';
 
 /**
@@ -46,6 +52,8 @@ export async function register(email: string, password: string): Promise<void> {
 export interface LoginResult {
   user: PublicUser;
   tokens: IssuedTokens;
+  /** Raw refresh token. The controller puts it in an httpOnly cookie and nothing else stores it. */
+  refreshToken: string;
 }
 
 /**
@@ -81,7 +89,48 @@ export async function login(email: string, password: string, ip: string): Promis
   // unverified, and routes that need a confirmed address guard themselves with
   // requireVerifiedEmail. Blocking login outright is also defensible, but it
   // leaves the user with no signed-in way to trigger a new verification email.
-  return { user: toPublicUser(user), tokens: issueTokens(user) };
+  const refreshToken = await issueRefreshToken(user.id);
+
+  return { user: toPublicUser(user), tokens: issueAccessToken(user), refreshToken };
+}
+
+/**
+ * Exchanges a valid refresh token for a new access token AND a new refresh token.
+ *
+ * The rotation and reuse detection live in refresh-token.service; this wrapper
+ * exists so the controller depends on one auth surface rather than reaching into
+ * two services.
+ */
+export async function refreshSession(rawToken: string): Promise<LoginResult> {
+  const { rawToken: nextToken, user } = await rotateRefreshToken(rawToken);
+
+  return { user: toPublicUser(user), tokens: issueAccessToken(user), refreshToken: nextToken };
+}
+
+/**
+ * Logs out one session.
+ *
+ * Only the refresh token is revoked; the access token already in the client's
+ * hands stays valid until it expires. That is the accepted cost of stateless
+ * access tokens -- checking a revocation list on every request would undo the
+ * reason they exist. A 15 minute TTL is what bounds the exposure, and anything
+ * needing instant cut-off (a banned account) should check state per request.
+ */
+export async function logout(rawToken: string | undefined): Promise<void> {
+  // No token presented is not an error: logging out twice, or with an expired
+  // session, should still leave the client logged out.
+  if (!rawToken) return;
+
+  await revokeRefreshToken(rawToken);
+}
+
+/** Signs a user out of every device by revoking all of their live refresh tokens. */
+export async function logoutAllSessions(userId: string): Promise<number> {
+  const revoked = await revokeAllUserTokens(userId);
+
+  logger.info({ userId, sessionsRevoked: revoked }, 'All sessions revoked');
+
+  return revoked;
 }
 
 /**

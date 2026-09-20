@@ -65,7 +65,6 @@ services:
       # Values come from the host's .env (compose substitutes ${VAR}), so real
       # secrets never live in this committed file.
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
       JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
       JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
       JWT_ISSUER: ${JWT_ISSUER:-auth-service}

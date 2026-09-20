@@ -4,8 +4,8 @@ A standalone authentication and authorization microservice — the kind of share
 service other applications authenticate against, rather than a login form attached to one
 frontend. API-only: Postman, curl, or Swagger UI is the interface.
 
-**Status:** Milestones 1–2 of 8 complete — scaffold, plus email/password registration,
-login with JWT issuing, and email verification. See [Roadmap](#roadmap).
+**Status:** Milestones 1–3 of 8 complete — scaffold, email/password auth with JWT issuing,
+and rotating refresh tokens with reuse detection and revocation. See [Roadmap](#roadmap).
 
 ---
 
@@ -18,7 +18,7 @@ login with JWT issuing, and email verification. See [Roadmap](#roadmap).
 | Database | PostgreSQL 16 + Prisma 7 | Typed queries, versioned migrations |
 | Cache / counters | Redis 7 | Shared rate-limit state across instances |
 | Password hashing | Argon2id | Memory-hard, so GPUs give an attacker little advantage |
-| Tokens | JWT (HS256) | Stateless access tokens; no DB hit per request |
+| Tokens | JWT (HS256) access + opaque refresh | Stateless auth per request, with real revocation |
 | Validation | Zod | One schema validates and types the request |
 | Tests | Vitest + Supertest | Integration tests against the real app object |
 | Logs | Pino | Structured JSON, secrets redacted at the logger |
@@ -86,8 +86,57 @@ GET /auth/verify-email?token=…              GET /auth/me
   └─ hit  → isEmailVerified = true            └─ controller loads and returns the user
 ```
 
-Milestone 3 adds the refresh half: login also mints a rotating refresh token, stored
-hashed, returned as an httpOnly cookie.
+### Token lifecycle
+
+Two token types, because one cannot be both cheap to check and possible to revoke:
+
+|  | Access token | Refresh token |
+| --- | --- | --- |
+| Form | Signed JWT (HS256) | Opaque 256-bit random string |
+| Lifetime | 15 minutes | 7 days |
+| Checked by | Signature only — no DB hit | Database lookup every time |
+| Carried in | `Authorization: Bearer` header | httpOnly cookie |
+| Stored server-side | Not at all | SHA-256 hash only |
+| Revocable | ✗ — valid until it expires | ✓ — instantly |
+
+The access token is fast because nothing is consulted to validate it, which is exactly why
+it cannot be revoked; the 15-minute TTL is what bounds that exposure. The refresh token is
+the opposite bargain: a database round trip per use, in exchange for instant revocation.
+
+```
+login ──► RT₁ ─────────────────────────────────► rotate ──► RT₂ ──► rotate ──► RT₃
+             │                                                 │
+             │ revokedAt set, replacedBy → RT₂                 │ …and so on
+             │ (row kept, never deleted)                       │
+             │
+             └─ someone presents RT₁ a SECOND time
+                        │
+                        ▼
+                REUSE DETECTED → revoke every session for that user
+```
+
+**Why rotation exists.** A refresh token is a bearer credential: nothing about it
+distinguishes the real user from someone who copied it. But only one party can spend it
+*first*. The loser presents an already-spent token, and that second use is the alarm.
+Without rotation a stolen token simply works, quietly, for its full seven days, and the
+theft is never observable at all.
+
+**Why the spent row is kept.** Deleting it would make a replayed token indistinguishable
+from a random string — "unknown token", not "this was stolen". `replacedBy` is what turns
+that into evidence.
+
+**Why reuse revokes everything.** At the moment of detection we cannot tell which of the
+two parties is legitimate, so we trust neither. With the v1 schema there is no `familyId`
+tying one rotation chain together, so "all sessions for this user" is a deliberate
+over-approximation: it signs the real user out of their other devices too. When a
+credential is known to have leaked, cutting too much is cheaper than leaving an attacker a
+working session — and a `familyId` column would narrow it later.
+
+One subtlety worth the code it costs: a token revoked *by rotation* (`replacedBy` set) is
+theft evidence, while one revoked by logout or by an earlier cascade is not. Treating both
+as reuse would mean that after a single incident, every other device raises its own "reuse
+detected" alarm on its next refresh — turning one real signal into a flood
+([`refresh-token.service.ts`](src/services/refresh-token.service.ts)).
 
 **Why this split:** controllers never touch the database, services never touch `req`/`res`.
 That means business logic is unit-testable without faking an HTTP request, and every error
@@ -122,9 +171,10 @@ src/
 ```bash
 cp .env.example .env
 
-# Generate the two JWT secrets (they must differ from each other)
-echo "JWT_ACCESS_SECRET=$(openssl rand -base64 48)"   # paste into .env
-echo "JWT_REFRESH_SECRET=$(openssl rand -base64 48)"  # paste into .env
+# Generate the signing secret for access tokens and paste it into .env.
+# (There is no refresh-token secret: refresh tokens are opaque random strings
+# checked against the database, not signed JWTs.)
+echo "JWT_ACCESS_SECRET=$(openssl rand -base64 48)"
 
 docker compose up --build
 ```
@@ -140,7 +190,7 @@ curl http://localhost:3000/api/v1/health/ready
 ### Option B — datastores in Docker, app on the host (for development)
 
 ```bash
-cp .env.example .env            # then fill in the two JWT secrets as above
+cp .env.example .env            # then fill in JWT_ACCESS_SECRET as above
 docker compose up -d postgres redis
 npm install
 npm run prisma:generate         # generates the typed client from schema.prisma
@@ -183,7 +233,10 @@ Postman or Insomnia. Swagger UI is mounted on top of it in milestone 7.
 | `GET` | `/api/v1/health/live` | — | Liveness. Touches no dependencies: a database outage should not cause an orchestrator to restart a healthy process. |
 | `GET` | `/api/v1/health/ready` | — | Readiness. Pings Postgres and Redis; returns `503` if either is down, so a load balancer stops routing here. |
 | `POST` | `/api/v1/auth/register` | — | Create an account. Always `202`, whether or not the email was taken (see below). |
-| `POST` | `/api/v1/auth/login` | — | Exchange credentials for an access token. |
+| `POST` | `/api/v1/auth/login` | — | Exchange credentials for an access token + refresh cookie. |
+| `POST` | `/api/v1/auth/refresh` | Refresh token | Rotate the refresh token, get a new access token. |
+| `POST` | `/api/v1/auth/logout` | Refresh token | End this session. Idempotent. |
+| `POST` | `/api/v1/auth/logout-all` | Bearer | Revoke every session for the account. |
 | `GET` | `/api/v1/auth/verify-email` | — | Confirm an address using the token from the emailed link. Single-use. |
 | `POST` | `/api/v1/auth/resend-verification` | — | Request a fresh verification link. |
 | `GET` | `/api/v1/auth/me` | Bearer | The authenticated user. |
@@ -216,6 +269,36 @@ curl -X POST http://localhost:3000/api/v1/auth/login \
 curl http://localhost:3000/api/v1/auth/me -H "Authorization: Bearer <ACCESS_TOKEN>"
 # => 200 {"user":{"id":"...","email":"dev@example.com","role":"USER","isEmailVerified":true,...}}
 ```
+
+### Watching rotation and theft detection
+
+`-c`/`-b` give curl a cookie jar, so it behaves like a browser holding the refresh cookie.
+
+```bash
+JAR=/tmp/auth-cookies.txt
+
+curl -s -c $JAR -X POST http://localhost:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"dev@example.com","password":"correct-horse-battery-staple"}' > /dev/null
+
+# Copy the current refresh token — this stands in for one an attacker stole.
+STOLEN=$(grep refresh_token $JAR | awk '{print $7}')
+
+# The real user refreshes first. Works, and rotates the token.
+curl -s -b $JAR -c $JAR -X POST http://localhost:3000/api/v1/auth/refresh | head -c 80
+
+# The attacker now replays their copy. It has already been spent.
+curl -s -X POST http://localhost:3000/api/v1/auth/refresh \
+  -H 'Content-Type: application/json' -d "{\"refreshToken\":\"$STOLEN\"}"
+# => 401 {"error":{"code":"UNAUTHORIZED","message":"Refresh token has already been used; all sessions revoked"}}
+
+# Every session for that account is now dead — including the real user's.
+curl -s -b $JAR -X POST http://localhost:3000/api/v1/auth/refresh
+# => 401 {"error":{"code":"UNAUTHORIZED","message":"Refresh token has been revoked"}}
+```
+
+The server log carries one `Refresh token reuse detected` warning for the actual theft,
+and routine `Revoked refresh token presented` notices for the sessions the cascade cut.
 
 ### Two deliberate deviations from the conventional REST answer
 
@@ -288,6 +371,10 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 | JWT algorithm pinned to HS256, issuer + audience verified | [`src/lib/jwt.ts`](src/lib/jwt.ts) |
 | Access tokens carry `type: "access"`, so a refresh token cannot be replayed as one | [`src/lib/jwt.ts`](src/lib/jwt.ts) |
 | Verification tokens stored hashed, single-use via atomic `GETDEL` | [`src/services/verification.service.ts`](src/services/verification.service.ts) |
+| Refresh tokens stored as SHA-256 hashes, never in plaintext | [`src/services/refresh-token.service.ts`](src/services/refresh-token.service.ts) |
+| Rotation on every use, with reuse escalating to full account revocation | [`src/services/refresh-token.service.ts`](src/services/refresh-token.service.ts) |
+| Rotation is transactional, with a guard against concurrent double-spend | [`src/services/refresh-token.service.ts`](src/services/refresh-token.service.ts) |
+| Refresh token kept out of JS reach: httpOnly, SameSite=Strict, path-scoped | [`src/lib/cookies.ts`](src/lib/cookies.ts) |
 | Unknown request fields stripped before reaching Prisma (no `role` injection) | [`src/middleware/validate.ts`](src/middleware/validate.ts) |
 | Every login attempt recorded for the audit trail | [`src/services/auth.service.ts`](src/services/auth.service.ts) |
 | Email links built from configured `APP_BASE_URL`, never the `Host` header | [`src/config/env.ts`](src/config/env.ts) |
@@ -308,7 +395,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ```bash
 docker compose up -d postgres redis   # the suite needs real datastores
-npm test                              # 51 tests
+npm test                              # 72 tests
 ```
 
 Tests run against a real Postgres, not a mocked Prisma client, because the behaviour most
@@ -331,9 +418,13 @@ The suite targets failure paths, not just happy ones. Currently covered:
   non-Bearer scheme, and a valid token whose user has since been deleted
 - Verification: replaying a used link, unknown token, and confirmation that only the
   token's hash is ever stored
+- Rotation: the chain is recorded rather than deleted, a replayed token revokes every
+  session for that user, other users are untouched, and expired or unknown tokens are
+  rejected without raising the theft alarm
+- Logout: idempotent, scoped to one session, and honest about the access token staying
+  valid until it expires; `logout-all` requires a real access token, not just a cookie
 
-Expired refresh tokens, reuse detection and rate-limit tripping join the list as those
-milestones land.
+Rate-limit tripping and wrong-role rejection join the list as those milestones land.
 
 ---
 
@@ -341,7 +432,7 @@ milestones land.
 
 - [x] **1. Scaffold** — Express + TypeScript + Prisma + Redis + Docker Compose, health checks, error handling
 - [x] **2. Email/password auth** — register, login, JWT issuing, email verification (stubbed mailer)
-- [ ] **3. Refresh token rotation** — reuse detection, logout, revocation
+- [x] **3. Refresh token rotation** — reuse detection, logout, revocation
 - [ ] **4. RBAC** — role middleware, protected example routes
 - [ ] **5. OAuth2** — Google + GitHub, account linking
 - [ ] **6. Rate limiting** — per-IP and per-account, brute-force protection

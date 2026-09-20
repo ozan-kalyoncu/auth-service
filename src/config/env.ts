@@ -22,8 +22,10 @@ const envSchema = z.object({
 
   // 32 chars is a floor, not a recommendation -- use `openssl rand -base64 48`.
   // Short secrets are brute-forceable offline once an attacker has one signed token.
+  //
+  // Only ACCESS tokens are signed. Refresh tokens are opaque random strings
+  // looked up in the database, so there is deliberately no refresh secret here.
   JWT_ACCESS_SECRET: z.string().min(32, 'JWT_ACCESS_SECRET must be at least 32 characters'),
-  JWT_REFRESH_SECRET: z.string().min(32, 'JWT_REFRESH_SECRET must be at least 32 characters'),
   JWT_ACCESS_TTL: z.string().default('15m'),
   JWT_REFRESH_TTL: z.string().default('7d'),
   JWT_ISSUER: z.string().default('auth-service'),

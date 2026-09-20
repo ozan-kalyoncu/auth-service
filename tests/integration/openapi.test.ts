@@ -16,7 +16,10 @@ describe('GET /api/v1/openapi.json', () => {
     // new endpoint shipping without its documentation entry.
     expect(Object.keys(response.body.paths).sort()).toEqual([
       '/auth/login',
+      '/auth/logout',
+      '/auth/logout-all',
       '/auth/me',
+      '/auth/refresh',
       '/auth/register',
       '/auth/resend-verification',
       '/auth/verify-email',

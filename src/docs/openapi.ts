@@ -52,10 +52,10 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Auth Service API',
-    version: '0.2.0',
+    version: '0.3.0',
     description:
-      'Authentication and authorization service. Access tokens are short-lived JWTs; ' +
-      'refresh token rotation arrives in milestone 3.',
+      'Authentication and authorization service. Short-lived JWT access tokens paired with ' +
+      'rotating, revocable refresh tokens that detect reuse.',
   },
   servers: [{ url: '/api/v1' }],
 
@@ -172,7 +172,9 @@ export const openApiDocument = {
         },
         responses: {
           200: {
-            description: 'Authenticated',
+            description:
+              'Authenticated. The refresh token is set as an httpOnly cookie and is ' +
+              'deliberately absent from this body, where page scripts could read it.',
             content: {
               'application/json': {
                 schema: {
@@ -192,6 +194,104 @@ export const openApiDocument = {
             },
           },
           400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+
+    '/auth/refresh': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Rotate the refresh token and get a new access token',
+        description:
+          'Reads the refresh token from the httpOnly cookie, or from the body for clients ' +
+          'without a cookie jar. Every call invalidates the token it was given and issues a ' +
+          'replacement. Presenting an already-used token is treated as theft: all of that ' +
+          "user's sessions are revoked and the call fails with 401.",
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  refreshToken: {
+                    type: 'string',
+                    description: 'Only needed when the cookie is not sent.',
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          200: {
+            description: 'Rotated. New refresh token is set as an httpOnly cookie.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    user: { $ref: '#/components/schemas/PublicUser' },
+                    accessToken: { type: 'string' },
+                    tokenType: { type: 'string', enum: ['Bearer'] },
+                    expiresIn: { type: 'integer', example: 900 },
+                  },
+                },
+              },
+            },
+          },
+          401: {
+            description: 'Token missing, unknown, expired, or already used (reuse detected)',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          },
+        },
+      },
+    },
+
+    '/auth/logout': {
+      post: {
+        tags: ['Auth'],
+        summary: 'End the current session',
+        description:
+          'Revokes the presented refresh token and clears the cookie. Idempotent: logging out ' +
+          'twice, or with no token at all, still returns 204. The access token already issued ' +
+          'stays valid until it expires -- the accepted cost of stateless tokens.',
+        requestBody: {
+          required: false,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: { refreshToken: { type: 'string' } },
+              },
+            },
+          },
+        },
+        responses: { 204: { description: 'Session ended' } },
+      },
+    },
+
+    '/auth/logout-all': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Sign out of every device',
+        description:
+          'Revokes every live refresh token for the account. Requires a valid access token, ' +
+          'since it acts on the whole account rather than one session.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'All sessions revoked',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { sessionsRevoked: { type: 'integer', example: 3 } },
+                },
+              },
+            },
+          },
           401: { $ref: '#/components/responses/Unauthorized' },
         },
       },

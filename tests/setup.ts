@@ -9,7 +9,6 @@ import { TEST_DATABASE_URL, TEST_REDIS_URL } from './test-env.js';
  */
 process.env.NODE_ENV = 'test';
 process.env.JWT_ACCESS_SECRET ??= 'test-access-secret-that-is-long-enough-32';
-process.env.JWT_REFRESH_SECRET ??= 'test-refresh-secret-that-is-long-enough-32';
 process.env.DATABASE_URL = TEST_DATABASE_URL;
 process.env.REDIS_URL = TEST_REDIS_URL;
 process.env.APP_BASE_URL = 'http://localhost:3000';

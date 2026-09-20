@@ -5,6 +5,7 @@ import { authenticate } from '../middleware/authenticate.js';
 import * as authController from '../controllers/auth.controller.js';
 import {
   loginSchema,
+  refreshSchema,
   registerSchema,
   resendVerificationSchema,
   verifyEmailQuerySchema,
@@ -42,5 +43,20 @@ authRouter.post(
   validate({ body: resendVerificationSchema }),
   asyncHandler(authController.resendVerification),
 );
+
+// Refresh and logout are NOT behind `authenticate`: they are reached with an
+// expired access token by definition -- that is the situation they exist for.
+// The refresh token itself is the credential, and it is checked in the service.
+authRouter.post(
+  '/refresh',
+  validate({ body: refreshSchema }),
+  asyncHandler(authController.refresh),
+);
+
+authRouter.post('/logout', validate({ body: refreshSchema }), asyncHandler(authController.logout));
+
+// Signing out every device acts on the whole account, so it requires a currently
+// valid access token rather than just possession of one session's cookie.
+authRouter.post('/logout-all', authenticate, asyncHandler(authController.logoutAll));
 
 authRouter.get('/me', authenticate, asyncHandler(authController.getCurrentUser));

@@ -34,5 +34,18 @@ export const resendVerificationSchema = z.object({
   email: emailSchema,
 });
 
+/**
+ * Refresh and logout take an OPTIONAL refresh token in the body.
+ *
+ * Browsers send it automatically in the httpOnly cookie and post nothing at all,
+ * so the body must be allowed to be empty. Non-browser clients (curl, another
+ * service) have no cookie jar and pass it here instead. "Missing from both" is
+ * a 401 decided in the controller, not a validation error -- absent credentials
+ * are an auth failure, not a malformed request.
+ */
+export const refreshSchema = z.object({
+  refreshToken: z.string().min(1).optional(),
+});
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
