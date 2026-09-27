@@ -90,6 +90,23 @@ export const openApiDocument = {
         description: 'No such resource',
         content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
       },
+      RateLimited: {
+        description:
+          'Rate limit exceeded, or the account is temporarily locked after repeated failed ' +
+          'logins. Every response carries RateLimit-Limit / RateLimit-Remaining / ' +
+          'RateLimit-Reset; this one also carries Retry-After.',
+        headers: {
+          'Retry-After': {
+            description: 'Seconds to wait before retrying',
+            schema: { type: 'integer' },
+          },
+          'RateLimit-Remaining': {
+            description: 'Requests left in the current window',
+            schema: { type: 'integer' },
+          },
+        },
+        content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+      },
     },
   },
 
@@ -156,6 +173,7 @@ export const openApiDocument = {
         responses: {
           202: { description: 'Request accepted; a verification link may have been sent' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -166,7 +184,9 @@ export const openApiDocument = {
         summary: 'Exchange email and password for an access token',
         description:
           'An unknown email and a wrong password produce an identical 401, and take ' +
-          'comparable time, so this endpoint cannot be used to discover valid addresses.',
+          'comparable time, so this endpoint cannot be used to discover valid addresses. ' +
+          'Rate limited per IP and per account; repeated failures lock the account with ' +
+          'exponential backoff, and a locked account is refused even with the right password.',
         requestBody: {
           required: true,
           content: {
@@ -207,6 +227,7 @@ export const openApiDocument = {
           },
           400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -257,6 +278,7 @@ export const openApiDocument = {
             description: 'Token missing, unknown, expired, or already used (reuse detected)',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
           },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -327,6 +349,7 @@ export const openApiDocument = {
         ],
         responses: {
           200: { description: 'Email address verified' },
+          429: { $ref: '#/components/responses/RateLimited' },
           400: {
             description: 'Token missing, unknown, already used, or expired',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
@@ -357,6 +380,7 @@ export const openApiDocument = {
         responses: {
           202: { description: 'Request accepted' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -462,6 +486,7 @@ export const openApiDocument = {
         ],
         responses: {
           302: { description: "Redirect to the provider's consent screen" },
+          429: { $ref: '#/components/responses/RateLimited' },
           404: {
             description: 'Unknown provider, or one this deployment has no credentials for',
             content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },

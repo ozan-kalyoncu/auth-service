@@ -4,9 +4,10 @@ A standalone authentication and authorization microservice — the kind of share
 service other applications authenticate against, rather than a login form attached to one
 frontend. API-only: Postman, curl, or Swagger UI is the interface.
 
-**Status:** Milestones 1–5 of 8 complete — scaffold, email/password auth with JWT issuing,
+**Status:** Milestones 1–6 of 8 complete — scaffold, email/password auth with JWT issuing,
 rotating refresh tokens with reuse detection, permission-based access control, and
-Google/GitHub sign-in with account linking. See [Roadmap](#roadmap).
+Google/GitHub sign-in with account linking, and Redis-backed rate limiting with
+brute-force protection. See [Roadmap](#roadmap).
 
 ---
 
@@ -442,6 +443,66 @@ sets the refresh cookie and redirects there with **no token in the URL** — que
 and fragments leak into browser history, server logs and `Referer` headers — leaving the
 app to call `/auth/refresh` for its access token.
 
+## Rate limiting and brute force
+
+Two separate defences, because they stop different attacks.
+
+**Per-IP rate limiting** keeps one machine from hammering an endpoint. Limits are set per
+route rather than globally — nobody registers five accounts an hour from one address by
+accident, but a browser tab left open overnight refreshes its token dozens of times. A
+single global number would have to accommodate the busiest endpoint, which makes it
+useless for the one that needs protecting.
+
+| Endpoint | Limit | Window |
+| --- | --- | --- |
+| `POST /auth/register` | 5 | 1 hour |
+| `POST /auth/login` | 10 (per IP **and** per account) | 5 min |
+| `POST /auth/refresh` | 60 | 5 min |
+| `POST /auth/resend-verification` | 3 (per IP and per account) | 1 hour |
+| `GET /auth/verify-email` | 20 | 1 hour |
+| `GET /auth/oauth/:provider` | 20 | 5 min |
+
+Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`, so a
+client can slow down before being cut off instead of discovering the limit by hitting it.
+A 429 adds `Retry-After`, turning "try again later" into a number — otherwise retries
+become their own small denial of service.
+
+The limiter runs **first** on every route, ahead of validation. Putting it after would mean
+an attacker still gets to spend the server's CPU parsing bodies and hashing passwords on
+requests that were going to be rejected anyway. Malformed requests consume quota too, or
+sending garbage would be a free pass.
+
+**Per-account brute-force protection** handles what per-IP cannot: an attacker with a
+botnet has thousands of addresses but still only needs to guess one account's password. So
+consecutive failures are counted against the *account*, wherever they come from. Past five,
+the account locks for 60 seconds, doubling with each further failure up to an hour.
+
+Backoff rather than permanent lockout, deliberately — a lock that never lifts *is* the
+attack, letting anyone who knows your email lock you out. Doubling delays make sustained
+guessing hopeless (at the ceiling, 24 attempts a day) while someone who mistypes twice
+notices nothing. A correct password clears the run, and a locked account is refused **even
+with the right password** — an attacker who eventually guesses right still cannot get in.
+
+Two details that matter:
+
+- **Unknown emails are locked identically.** If only real accounts could be locked, the
+  difference between 401 and 429 would reveal which addresses exist — undoing the
+  enumeration work the login endpoint already does.
+- **Emails are hashed into the Redis key.** A list of plaintext addresses currently under
+  attack is a target in its own right.
+
+**Why Redis, not memory.** With four containers behind a load balancer, an in-memory limit
+of 10 is really 40, and an attacker spreading attempts across instances trips none of them.
+Redis is the one place every instance agrees on, and its per-key TTL expires windows for
+free. The counter uses a Lua script so `INCR` and `EXPIRE` are atomic: with two separate
+commands, a process dying in between leaves a key with no expiry and that caller limited
+forever.
+
+**When Redis is down the limiter fails open** — availability over strictness, since a cache
+outage should not lock every user out of the service. That is only defensible because of
+the second line of defence: `/health/ready` reports Redis down, so the orchestrator pulls
+the instance from rotation rather than leaving it serving unlimited login attempts.
+
 ## Access control
 
 Routes declare the **capability** they need, not the role they expect. The tempting
@@ -605,6 +666,10 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 | Unknown request fields stripped before reaching Prisma (no `role` injection) | [`src/middleware/validate.ts`](src/middleware/validate.ts) |
 | Every login attempt recorded for the audit trail | [`src/services/auth.service.ts`](src/services/auth.service.ts) |
 | Email links built from configured `APP_BASE_URL`, never the `Host` header | [`src/config/env.ts`](src/config/env.ts) |
+| Per-IP rate limiting on every unauthenticated endpoint, ahead of validation | [`src/middleware/rate-limit.ts`](src/middleware/rate-limit.ts) |
+| Per-account brute-force lockout with exponential backoff | [`src/services/brute-force.service.ts`](src/services/brute-force.service.ts) |
+| Rate-limit counters atomic (Lua) and shared across instances | [`src/lib/rate-limit.ts`](src/lib/rate-limit.ts) |
+| Emails hashed into rate-limit keys, never stored in Redis as plaintext | [`src/middleware/rate-limit.ts`](src/middleware/rate-limit.ts) |
 | Security headers (HSTS, nosniff, frame denial, CSP) | `helmet()` in [`src/app.ts`](src/app.ts) |
 | CORS allowlist, no wildcard with credentials | [`src/app.ts`](src/app.ts) |
 | Request body size cap (100 kb) | [`src/app.ts`](src/app.ts) |
@@ -622,7 +687,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ```bash
 docker compose up -d postgres redis   # the suite needs real datastores
-npm test                              # 127 tests
+npm test                              # 144 tests
 ```
 
 Tests run against a real Postgres, not a mocked Prisma client, because the behaviour most
@@ -668,7 +733,11 @@ The two functions that talk to Google and GitHub over the network are mocked; st
 handling, linking rules and session issuing all run for real, so the tests stay offline and
 deterministic without faking away the logic worth testing.
 
-Rate-limit tripping joins the list when milestone 6 lands.
+- Rate limiting: headers present on success, 429 with `Retry-After` past the limit,
+  malformed requests still consuming quota, separate buckets per endpoint, exponential
+  backoff lengthening per failure, a locked account refused even with the correct
+  password, unknown emails locked identically, other accounts unaffected, and a locked
+  request rejected before any Argon2 work happens
 
 ---
 
@@ -679,7 +748,7 @@ Rate-limit tripping joins the list when milestone 6 lands.
 - [x] **3. Refresh token rotation** — reuse detection, logout, revocation
 - [x] **4. RBAC** — permission middleware, protected user-management routes
 - [x] **5. OAuth2** — Google + GitHub, account linking
-- [ ] **6. Rate limiting** — per-IP and per-account, brute-force protection
+- [x] **6. Rate limiting** — per-IP and per-account, brute-force protection
 - [ ] **7. Docs** — OpenAPI spec + auth flow diagram
 - [ ] **8. Stretch** — TOTP-based 2FA
 

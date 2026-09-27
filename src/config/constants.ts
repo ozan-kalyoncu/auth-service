@@ -50,3 +50,44 @@ export const OAUTH_STATE_TTL_SECONDS = 60 * 10;
 export const OAUTH_STATE_COOKIE = 'oauth_state';
 
 export const OAUTH_STATE_COOKIE_PATH = '/api/v1/auth/oauth';
+
+/**
+ * Per-IP rate limits, tuned per endpoint rather than one global number.
+ *
+ * The limit reflects what legitimate use of THAT endpoint looks like. Nobody
+ * registers five accounts an hour from one address by accident, but a browser
+ * tab left open overnight will refresh its token a few dozen times, so the
+ * numbers differ by an order of magnitude. A single global limit would have to
+ * be set high enough for the busiest endpoint, which makes it useless for the
+ * one that actually needs protecting.
+ */
+export const RATE_LIMITS = {
+  login: { bucket: 'login', limit: 10, windowSeconds: 300 },
+  register: { bucket: 'register', limit: 5, windowSeconds: 3600 },
+  refresh: { bucket: 'refresh', limit: 60, windowSeconds: 300 },
+  resendVerification: { bucket: 'resend-verification', limit: 3, windowSeconds: 3600 },
+  verifyEmail: { bucket: 'verify-email', limit: 20, windowSeconds: 3600 },
+  oauthStart: { bucket: 'oauth-start', limit: 20, windowSeconds: 300 },
+  twoFactor: { bucket: 'two-factor', limit: 10, windowSeconds: 300 },
+} as const;
+
+/**
+ * Brute-force protection on a single account, which is a different problem from
+ * per-IP rate limiting: an attacker with a botnet has thousands of IPs but still
+ * has to guess one account's password.
+ *
+ * After `threshold` consecutive failures the account is locked for a period that
+ * doubles with each further failure. Exponential backoff makes sustained guessing
+ * pointless within a few attempts, while an honest user who mistypes twice sees
+ * nothing at all.
+ */
+export const BRUTE_FORCE = {
+  /** Failures allowed before the first lock. */
+  threshold: 5,
+  /** First lock duration; doubles per failure beyond the threshold. */
+  baseLockSeconds: 60,
+  /** Ceiling, so an account is never locked out permanently by an attacker. */
+  maxLockSeconds: 3600,
+  /** How long a run of failures is remembered when no further attempts arrive. */
+  failureWindowSeconds: 3600,
+} as const;

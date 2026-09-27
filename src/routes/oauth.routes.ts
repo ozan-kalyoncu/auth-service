@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { asyncHandler } from '../middleware/async-handler.js';
 import { authenticate } from '../middleware/authenticate.js';
+import { rateLimitByIp } from '../middleware/rate-limit.js';
+import { RATE_LIMITS } from '../config/constants.js';
 import * as oauthController from '../controllers/oauth.controller.js';
 
 /**
@@ -22,5 +24,12 @@ oauthRouter.get('/', oauthController.listProviders);
 // Which providers the CALLER has linked, as opposed to which the server offers.
 oauthRouter.get('/linked', authenticate, asyncHandler(oauthController.listMyLinkedProviders));
 
-oauthRouter.get('/:provider', asyncHandler(oauthController.start));
+// Limited because each start writes a state entry to Redis; the callback is
+// deliberately not limited, since a legitimate user arrives there exactly once
+// and an invalid state is already rejected before any work happens.
+oauthRouter.get(
+  '/:provider',
+  rateLimitByIp(RATE_LIMITS.oauthStart),
+  asyncHandler(oauthController.start),
+);
 oauthRouter.get('/:provider/callback', asyncHandler(oauthController.callback));

@@ -13,6 +13,7 @@ import {
   rotateRefreshToken,
 } from './refresh-token.service.js';
 import { toPublicUser, type PublicUser } from './user.service.js';
+import { assertNotLocked, clearFailures, recordFailure } from './brute-force.service.js';
 
 /**
  * Registers a new account.
@@ -64,6 +65,11 @@ export interface LoginResult {
  * attacker could harvest valid addresses without ever guessing a password.
  */
 export async function login(email: string, password: string, ip: string): Promise<LoginResult> {
+  // Checked before anything else, including before the user lookup: a locked
+  // account should cost an attacker one Redis read, not a database query and a
+  // deliberately-slow Argon2 verification.
+  await assertNotLocked(email);
+
   const user = await findUserByEmail(email);
 
   if (!user || !user.passwordHash) {
@@ -73,6 +79,12 @@ export async function login(email: string, password: string, ip: string): Promis
     // attempt and the timing difference stops being an enumeration signal.
     await burnPasswordVerification(password);
     await recordLoginAttempt(user?.id ?? null, ip, false);
+
+    // Counted even for an email with no account. Skipping it would make the
+    // lockout itself an oracle: an attacker could tell real addresses from
+    // fictional ones by which ones can be locked.
+    await recordFailure(email);
+
     throw AppError.unauthorized('Invalid email or password');
   }
 
@@ -80,10 +92,15 @@ export async function login(email: string, password: string, ip: string): Promis
 
   if (!passwordMatches) {
     await recordLoginAttempt(user.id, ip, false);
+    await recordFailure(email);
     throw AppError.unauthorized('Invalid email or password');
   }
 
   await recordLoginAttempt(user.id, ip, true);
+
+  // A correct password clears the run of failures. Otherwise someone who
+  // mistyped four times and then succeeded would stay one slip from a lock.
+  await clearFailures(email);
 
   // An unverified email is NOT blocked from logging in. The account simply stays
   // unverified, and routes that need a confirmed address guard themselves with
