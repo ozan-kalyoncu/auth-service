@@ -4,9 +4,9 @@ A standalone authentication and authorization microservice — the kind of share
 service other applications authenticate against, rather than a login form attached to one
 frontend. API-only: Postman, curl, or Swagger UI is the interface.
 
-**Status:** Milestones 1–4 of 8 complete — scaffold, email/password auth with JWT issuing,
-rotating refresh tokens with reuse detection, and permission-based access control.
-See [Roadmap](#roadmap).
+**Status:** Milestones 1–5 of 8 complete — scaffold, email/password auth with JWT issuing,
+rotating refresh tokens with reuse detection, permission-based access control, and
+Google/GitHub sign-in with account linking. See [Roadmap](#roadmap).
 
 ---
 
@@ -153,7 +153,8 @@ src/
 ├── controllers/  request → response translation only
 ├── services/     business logic; no knowledge of HTTP
 ├── middleware/   error handler, async wrapper, validation, authenticate (RBAC to come)
-├── lib/          Prisma + Redis clients, logger, AppError, password hashing, JWT, mailer
+├── lib/          Prisma + Redis clients, logger, AppError, password hashing, JWT, cookies, mailer
+│   └── oauth/    provider registry and the authorization-code client
 ├── prisma/       schema.prisma + migrations
 ├── validators/   Zod request schemas
 ├── docs/         OpenAPI document
@@ -243,6 +244,10 @@ Postman or Insomnia. Swagger UI is mounted on top of it in milestone 7.
 | `GET` | `/api/v1/auth/verify-email` | — | Confirm an address using the token from the emailed link. Single-use. |
 | `POST` | `/api/v1/auth/resend-verification` | — | Request a fresh verification link. |
 | `GET` | `/api/v1/auth/me` | Bearer | The authenticated user and their permissions. |
+| `GET` | `/api/v1/auth/oauth` | — | Which social providers this deployment offers. |
+| `GET` | `/api/v1/auth/oauth/:provider` | — | Begin social sign-in (302 to the provider). |
+| `GET` | `/api/v1/auth/oauth/:provider/callback` | — | Provider redirect target. Not called by your code. |
+| `GET` | `/api/v1/auth/oauth/linked` | Bearer | Providers linked to the caller's account. |
 | `GET` | `/api/v1/users` | `users:read` | List users, paginated. |
 | `GET` | `/api/v1/users/:id` | Self or `users:read` | Read one user. |
 | `PATCH` | `/api/v1/users/:id/role` | `users:manage-roles` | Change a user's role. |
@@ -326,6 +331,116 @@ password costs ~50 ms of Argon2, while bailing out early on an unknown email cos
 microseconds. That gap alone leaks which addresses exist, so the unknown-email path
 verifies against a throwaway hash to spend the same time
 ([`src/lib/password.ts`](src/lib/password.ts)).
+
+## Social login
+
+Google and GitHub, implemented as a hand-rolled authorization-code client rather than
+Passport. Passport is built around sessions and serialise/deserialise hooks that a
+stateless JWT service has no use for, and it hides the one step that matters most here —
+the code-for-token exchange. Two providers of straight-line HTTP came to less code than
+the strategy plumbing it would have replaced.
+
+```
+browser          this service                     provider
+   │                  │                              │
+   │ GET /auth/oauth/google                          │
+   │─────────────────►│                              │
+   │                  │ mint state → Redis + cookie  │
+   │◄─ 302 ───────────│                              │
+   │─────────────────────────────────────────────────►│  sign in, approve
+   │◄─ 302 back with ?code=…&state=… ─────────────────│
+   │─────────────────►│                              │
+   │                  │ 1. state from URL == cookie? │
+   │                  │    and still in Redis?       │
+   │                  │ 2. POST code + client_secret ─────►│   server to server
+   │                  │◄──────────── provider token ──────│
+   │                  │ 3. GET profile ──────────────────►│
+   │                  │◄──────── id, email, verified ─────│
+   │                  │ 4. sign in / link / create   │
+   │◄─ refresh cookie + access token ─│              │
+```
+
+Step 2 is server-to-server on purpose: the `code` passes through the browser where it can
+be observed, but it is worthless without the client secret only this server holds. The
+provider's token is used once to read the profile and then **discarded** — storing it
+would mean holding a live credential to someone's Google account for no reason.
+
+### `state`, and the attack it stops
+
+Without `state`, an attacker can complete a flow with *their* provider account, capture
+the resulting `code`, and trick a signed-in victim into loading the callback URL carrying
+it. The victim's browser completes a sign-in they never started, silently attaching the
+attacker's identity to the victim's session — login CSRF.
+
+So the callback must prove it belongs to a flow *this browser* began. A random value goes
+to the provider in the URL and into an httpOnly cookie; both must come back and match.
+Redis holds the hash alongside the flow metadata, which adds what a cookie alone cannot:
+single-use across every instance, and automatic expiry after ten minutes.
+
+That cookie is `SameSite=Lax`, not `Strict` like the refresh cookie. The user returns via a
+cross-site top-level navigation from google.com — and a Strict cookie is withheld on
+exactly that, so the callback would never see the state it needs.
+
+Every state failure — missing, mismatched, expired, replayed, wrong provider — returns the
+same generic 401. Saying which one would tell an attacker how close they got.
+
+### Account linking
+
+Sign up with a password, later click "Sign in with Google", and you land on **one**
+account. Three cases, in priority order:
+
+| Situation | Outcome |
+| --- | --- |
+| This provider identity is already linked | `signed-in` — matched on the provider's stable user id |
+| A local account has the same **verified** email | `linked` — an `OAuthAccount` row is added |
+| Nothing matches | `created` — new user, `passwordHash` stays `null` |
+
+Identities are matched on the provider's user id, never on email. People change their email
+address, and matching on one would hand the account to whoever inherits that address next.
+
+**Linking requires the provider to have verified the email**, and this is the sharp edge of
+the whole feature. If linking happened on an unverified address, an attacker could register
+`victim@example.com` at a provider with lax verification, sign in here, and be handed the
+victim's existing account — a pre-account-takeover. An unverified address proves nothing
+about who controls the mailbox, so that case is refused with a 403 and logged. GitHub makes
+this concrete: `/user` hides the email unless it is public, so the verified address is read
+from `/user/emails` and an account with none is turned away.
+
+New OAuth accounts get `passwordHash: null` — exactly what the nullable column is for.
+Inventing a random password nobody knows would leave an unusable credential on the account
+and make "does this user have a password?" unanswerable.
+
+### Configuring a provider
+
+Each provider is optional and checked independently: a missing GitHub secret means that
+button is not offered, and nothing else changes. Register the callback URL exactly as it
+appears below — providers reject a `redirect_uri` that does not match.
+
+```bash
+# .env — Google: https://console.cloud.google.com/apis/credentials
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+#   redirect URI: http://localhost:3000/api/v1/auth/oauth/google/callback
+
+# GitHub: https://github.com/settings/developers
+GITHUB_CLIENT_ID=...
+GITHUB_CLIENT_SECRET=...
+#   redirect URI: http://localhost:3000/api/v1/auth/oauth/github/callback
+```
+
+```bash
+curl http://localhost:3000/api/v1/auth/oauth
+# => {"providers":["google"]}          # only what is configured
+
+# Open this in a browser — it 302s to Google and sets the state cookie.
+open http://localhost:3000/api/v1/auth/oauth/google
+```
+
+With `OAUTH_SUCCESS_REDIRECT_URL` unset, the callback returns the session as JSON, which is
+what makes the flow demonstrable in an API-only service. Set it, and the callback instead
+sets the refresh cookie and redirects there with **no token in the URL** — query strings
+and fragments leak into browser history, server logs and `Referer` headers — leaving the
+app to call `/auth/refresh` for its access token.
 
 ## Access control
 
@@ -482,6 +597,11 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 | Self-demotion and self-deletion refused, to prevent admin lockout | [`src/services/user-admin.service.ts`](src/services/user-admin.service.ts) |
 | List endpoints paginated with a server-enforced ceiling | [`src/validators/user.validators.ts`](src/validators/user.validators.ts) |
 | Unprivileged callers cannot distinguish 403 from 404 to probe for ids | [`src/middleware/authorize.ts`](src/middleware/authorize.ts) |
+| OAuth `state` bound to the browser, single-use, expiring — blocks login CSRF | [`src/services/oauth-state.service.ts`](src/services/oauth-state.service.ts) |
+| Account linking refused on a provider-unverified email (pre-account-takeover) | [`src/services/oauth.service.ts`](src/services/oauth.service.ts) |
+| Provider tokens used once for the profile, never stored | [`src/controllers/oauth.controller.ts`](src/controllers/oauth.controller.ts) |
+| OAuth identities keyed on the provider's stable user id, not email | [`src/services/oauth.service.ts`](src/services/oauth.service.ts) |
+| Minimum scopes requested (no profile, name or avatar) | [`src/lib/oauth/providers.ts`](src/lib/oauth/providers.ts) |
 | Unknown request fields stripped before reaching Prisma (no `role` injection) | [`src/middleware/validate.ts`](src/middleware/validate.ts) |
 | Every login attempt recorded for the audit trail | [`src/services/auth.service.ts`](src/services/auth.service.ts) |
 | Email links built from configured `APP_BASE_URL`, never the `Host` header | [`src/config/env.ts`](src/config/env.ts) |
@@ -502,7 +622,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ```bash
 docker compose up -d postgres redis   # the suite needs real datastores
-npm test                              # 99 tests
+npm test                              # 127 tests
 ```
 
 Tests run against a real Postgres, not a mocked Prisma client, because the behaviour most
@@ -537,6 +657,17 @@ The suite targets failure paths, not just happy ones. Currently covered:
   self-demotion and self-deletion blocked, and deletion cascading to refresh tokens while
   the login audit trail survives
 
+- OAuth: forged, absent, replayed and cross-provider `state` all rejected; cancelled
+  sign-in; account created with a null password; the same identity signing back in without
+  duplicating; linking to an existing password account and leaving that password working;
+  **linking refused on an unverified provider email**; case-insensitive email matching; two
+  providers linked to one account; an unconfigured provider 404ing without affecting the
+  configured one
+
+The two functions that talk to Google and GitHub over the network are mocked; state
+handling, linking rules and session issuing all run for real, so the tests stay offline and
+deterministic without faking away the logic worth testing.
+
 Rate-limit tripping joins the list when milestone 6 lands.
 
 ---
@@ -547,7 +678,7 @@ Rate-limit tripping joins the list when milestone 6 lands.
 - [x] **2. Email/password auth** — register, login, JWT issuing, email verification (stubbed mailer)
 - [x] **3. Refresh token rotation** — reuse detection, logout, revocation
 - [x] **4. RBAC** — permission middleware, protected user-management routes
-- [ ] **5. OAuth2** — Google + GitHub, account linking
+- [x] **5. OAuth2** — Google + GitHub, account linking
 - [ ] **6. Rate limiting** — per-IP and per-account, brute-force protection
 - [ ] **7. Docs** — OpenAPI spec + auth flow diagram
 - [ ] **8. Stretch** — TOTP-based 2FA

@@ -3,6 +3,7 @@ import { asyncHandler } from '../middleware/async-handler.js';
 import { validate } from '../middleware/validate.js';
 import { authenticate } from '../middleware/authenticate.js';
 import * as authController from '../controllers/auth.controller.js';
+import { oauthRouter } from './oauth.routes.js';
 import {
   loginSchema,
   refreshSchema,
@@ -60,3 +61,6 @@ authRouter.post('/logout', validate({ body: refreshSchema }), asyncHandler(authC
 authRouter.post('/logout-all', authenticate, asyncHandler(authController.logoutAll));
 
 authRouter.get('/me', authenticate, asyncHandler(authController.getCurrentUser));
+
+// Social login lives under /auth/oauth/*.
+authRouter.use('/oauth', oauthRouter);

@@ -1,6 +1,12 @@
 import type { CookieOptions, Response } from 'express';
 import { isProduction } from '../config/env.js';
-import { REFRESH_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE_PATH } from '../config/constants.js';
+import {
+  OAUTH_STATE_COOKIE,
+  OAUTH_STATE_COOKIE_PATH,
+  OAUTH_STATE_TTL_SECONDS,
+  REFRESH_TOKEN_COOKIE,
+  REFRESH_TOKEN_COOKIE_PATH,
+} from '../config/constants.js';
 
 /**
  * The refresh token is delivered as a cookie rather than in the JSON body.
@@ -55,4 +61,34 @@ export function setRefreshTokenCookie(res: Response, token: string, maxAgeSecond
 export function clearRefreshTokenCookie(res: Response): void {
   const { maxAge: _maxAge, ...options } = cookieOptions(0);
   res.clearCookie(REFRESH_TOKEN_COOKIE, options);
+}
+
+/**
+ * Cookie carrying the OAuth `state` for the duration of one sign-in.
+ *
+ * Note sameSite is 'lax' here, not 'strict' as on the refresh cookie. The user
+ * arrives back from google.com or github.com, which is a cross-site top-level
+ * navigation -- and a Strict cookie is withheld on exactly that, so the callback
+ * would never see the state it needs to compare. 'lax' still sends it only on
+ * top-level navigations, not on cross-site sub-requests, which is what this
+ * needs to be safe.
+ */
+function stateCookieOptions(): CookieOptions {
+  return {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: 'lax',
+    path: OAUTH_STATE_COOKIE_PATH,
+    maxAge: OAUTH_STATE_TTL_SECONDS * 1000,
+  };
+}
+
+export function setOAuthStateCookie(res: Response, state: string): void {
+  res.cookie(OAUTH_STATE_COOKIE, state, stateCookieOptions());
+}
+
+/** Cleared as soon as the callback consumes it, whether it succeeded or not. */
+export function clearOAuthStateCookie(res: Response): void {
+  const { maxAge: _maxAge, ...options } = stateCookieOptions();
+  res.clearCookie(OAUTH_STATE_COOKIE, options);
 }

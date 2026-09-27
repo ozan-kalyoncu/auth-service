@@ -52,11 +52,11 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Auth Service API',
-    version: '0.4.0',
+    version: '0.5.0',
     description:
       'Authentication and authorization service. Short-lived JWT access tokens paired with ' +
-      'rotating, revocable refresh tokens that detect reuse, plus permission-based access ' +
-      'control.',
+      'rotating, revocable refresh tokens that detect reuse, permission-based access control, ' +
+      'and Google/GitHub sign-in with account linking.',
   },
   servers: [{ url: '/api/v1' }],
 
@@ -389,6 +389,147 @@ export const openApiDocument = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+
+    '/auth/oauth': {
+      get: {
+        tags: ['OAuth'],
+        summary: 'List the social providers this deployment offers',
+        description:
+          'Only providers with credentials configured are listed. Each is independent: a ' +
+          'missing GitHub secret leaves Google and password login unaffected.',
+        responses: {
+          200: {
+            description: 'Available providers',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    providers: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['google', 'github'] },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    '/auth/oauth/linked': {
+      get: {
+        tags: ['OAuth'],
+        summary: 'List the providers linked to the caller',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          200: {
+            description: 'Linked providers',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: { providers: { type: 'array', items: { type: 'string' } } },
+                },
+              },
+            },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+        },
+      },
+    },
+
+    '/auth/oauth/{provider}': {
+      get: {
+        tags: ['OAuth'],
+        summary: 'Begin a social sign-in',
+        description:
+          'A browser endpoint, not an API call: point a "Sign in with Google" link here and ' +
+          'the response is a 302 to the provider. Also sets a short-lived httpOnly `state` ' +
+          'cookie that the callback requires, which is what proves the callback belongs to a ' +
+          'flow this browser started.',
+        parameters: [
+          {
+            name: 'provider',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', enum: ['google', 'github'] },
+          },
+        ],
+        responses: {
+          302: { description: "Redirect to the provider's consent screen" },
+          404: {
+            description: 'Unknown provider, or one this deployment has no credentials for',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          },
+        },
+      },
+    },
+
+    '/auth/oauth/{provider}/callback': {
+      get: {
+        tags: ['OAuth'],
+        summary: 'Provider redirect target',
+        description:
+          'Called by the provider, not by your code. Validates `state` against the cookie, ' +
+          'exchanges the code for a provider token server-to-server, reads the profile, then ' +
+          'signs in / links / creates the local account. Sets the refresh cookie. Returns JSON ' +
+          'when OAUTH_SUCCESS_REDIRECT_URL is unset, otherwise redirects there with no token ' +
+          'in the URL.',
+        parameters: [
+          {
+            name: 'provider',
+            in: 'path',
+            required: true,
+            schema: { type: 'string', enum: ['google', 'github'] },
+          },
+          { name: 'code', in: 'query', schema: { type: 'string' } },
+          { name: 'state', in: 'query', schema: { type: 'string' } },
+          {
+            name: 'error',
+            in: 'query',
+            schema: { type: 'string' },
+            description: 'Present when the user cancelled or denied at the provider',
+          },
+        ],
+        responses: {
+          200: {
+            description: 'Signed in',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    user: { $ref: '#/components/schemas/PublicUser' },
+                    outcome: {
+                      type: 'string',
+                      enum: ['signed-in', 'linked', 'created'],
+                      description: 'Whether an existing identity was used, linked, or created',
+                    },
+                    accessToken: { type: 'string' },
+                    tokenType: { type: 'string', enum: ['Bearer'] },
+                    expiresIn: { type: 'integer', example: 900 },
+                  },
+                },
+              },
+            },
+          },
+          302: { description: 'Redirect to OAUTH_SUCCESS_REDIRECT_URL when configured' },
+          401: {
+            description: 'Invalid, expired or replayed state; cancelled at the provider',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          },
+          403: {
+            description:
+              'The email is already registered here and the provider has not verified it, ' +
+              'so linking is refused (pre-account-takeover defence).',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/Error' } } },
+          },
+          404: { $ref: '#/components/responses/NotFound' },
         },
       },
     },

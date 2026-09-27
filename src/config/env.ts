@@ -10,7 +10,27 @@ import { z } from 'zod';
  * before the server ever accepts traffic ("fail fast"), and gives the rest of the
  * codebase a fully typed config object instead of `string | undefined` everywhere.
  */
-const envSchema = z.object({
+
+/**
+ * Treats a blank variable as absent.
+ *
+ * `.optional()` permits a MISSING key, not an empty one -- so `FOO=` in a .env
+ * file still arrives as `""` and fails a url() or min() check. That distinction
+ * is invisible to whoever is editing the file: a commented-out placeholder left
+ * blank is plainly meant as "not configured", and should also let a `.default()`
+ * apply. Normalising here keeps every optional variable honest, rather than
+ * patching each one the first time it breaks a deploy.
+ */
+function blankToUndefined<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    schema,
+  );
+}
+
+// Exported so a test can check the committed .env.example still parses, rather
+// than that being discovered by a container crash-looping on startup.
+export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   // 'silent' disables logging entirely -- used by the test suite so assertion
@@ -35,7 +55,7 @@ const envSchema = z.object({
   // (verification, and password reset later). It cannot be derived from the
   // request host: that header is attacker-controlled, and trusting it lets
   // someone request a verification email containing a link to their own domain.
-  APP_BASE_URL: z.url().default('http://localhost:3000'),
+  APP_BASE_URL: blankToUndefined(z.url().default('http://localhost:3000')),
 
   // Stored in .env as a comma-separated string; transformed into an array here so
   // no consumer has to remember the encoding.
@@ -49,13 +69,21 @@ const envSchema = z.object({
         .filter(Boolean),
     ),
 
-  // Optional until milestone 5 (OAuth2). Absent means "provider not configured",
-  // which the OAuth routes will treat as disabled rather than crashing.
-  GOOGLE_CLIENT_ID: z.string().optional(),
-  GOOGLE_CLIENT_SECRET: z.string().optional(),
-  GITHUB_CLIENT_ID: z.string().optional(),
-  GITHUB_CLIENT_SECRET: z.string().optional(),
-  OAUTH_CALLBACK_BASE_URL: z.url().default('http://localhost:3000'),
+  // Absent (or blank) means "provider not configured", which the OAuth routes
+  // treat as "this deployment does not offer it" rather than crashing. That is
+  // why these are normalised: `.env.example` ships them blank on purpose.
+  GOOGLE_CLIENT_ID: blankToUndefined(z.string().optional()),
+  GOOGLE_CLIENT_SECRET: blankToUndefined(z.string().optional()),
+  GITHUB_CLIENT_ID: blankToUndefined(z.string().optional()),
+  GITHUB_CLIENT_SECRET: blankToUndefined(z.string().optional()),
+  OAUTH_CALLBACK_BASE_URL: blankToUndefined(z.url().default('http://localhost:3000')),
+
+  // Where to send the browser after a successful OAuth sign-in. When set, the
+  // callback sets the refresh cookie and redirects here WITHOUT putting any
+  // token in the URL -- the app then calls /auth/refresh for an access token.
+  // Left unset (the default), the callback returns JSON instead, which is what
+  // makes the flow demonstrable with curl in a service that has no frontend.
+  OAUTH_SUCCESS_REDIRECT_URL: blankToUndefined(z.url().optional()),
 });
 
 const parsed = envSchema.safeParse(process.env);

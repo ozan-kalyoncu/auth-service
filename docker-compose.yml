@@ -71,6 +71,13 @@ services:
       JWT_AUDIENCE: ${JWT_AUDIENCE:-auth-service-clients}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      # Blank is fine: a provider without credentials is simply not offered.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      OAUTH_CALLBACK_BASE_URL: ${OAUTH_CALLBACK_BASE_URL:-http://localhost:3000}
+      OAUTH_SUCCESS_REDIRECT_URL: ${OAUTH_SUCCESS_REDIRECT_URL:-}
     ports:
       - '${PORT:-3000}:3000'
     # Migrations run at container start rather than during the image build: a

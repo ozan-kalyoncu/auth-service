@@ -37,3 +37,16 @@ export const REFRESH_TOKEN_COOKIE_PATH = '/api/v1/auth';
  * that a link sitting in an abandoned inbox does not stay usable forever.
  */
 export const EMAIL_VERIFICATION_TTL_SECONDS = 60 * 60 * 24;
+
+/**
+ * How long an in-flight OAuth login may take.
+ *
+ * Generous enough to sign in and approve at the provider, short enough that a
+ * `state` left over in a closed tab stops being redeemable quickly.
+ */
+export const OAUTH_STATE_TTL_SECONDS = 60 * 10;
+
+/** Cookie holding the OAuth `state`, so the callback can prove it began here. */
+export const OAUTH_STATE_COOKIE = 'oauth_state';
+
+export const OAUTH_STATE_COOKIE_PATH = '/api/v1/auth/oauth';
