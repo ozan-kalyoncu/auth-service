@@ -7,7 +7,11 @@
  * reviewable, at the cost of having to update it alongside each endpoint --
  * which the project conventions require anyway.
  *
- * Milestone 7 mounts Swagger UI on top of this document.
+ * The cost of hand-writing is drift: a route that ships without an entry here.
+ * tests/integration/openapi.test.ts walks the live Express router and fails if
+ * any method + path pair is missing from this document, or documented but gone.
+ *
+ * Swagger UI renders this document at /api/v1/docs.
  */
 
 const errorResponse = {
@@ -52,7 +56,7 @@ export const openApiDocument = {
   openapi: '3.1.0',
   info: {
     title: 'Auth Service API',
-    version: '0.5.0',
+    version: '1.0.0',
     description:
       'Authentication and authorization service. Short-lived JWT access tokens paired with ' +
       'rotating, revocable refresh tokens that detect reuse, permission-based access control, ' +

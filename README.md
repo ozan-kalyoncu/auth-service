@@ -4,10 +4,13 @@ A standalone authentication and authorization microservice — the kind of share
 service other applications authenticate against, rather than a login form attached to one
 frontend. API-only: Postman, curl, or Swagger UI is the interface.
 
-**Status:** Milestones 1–6 of 8 complete — scaffold, email/password auth with JWT issuing,
-rotating refresh tokens with reuse detection, permission-based access control, and
-Google/GitHub sign-in with account linking, and Redis-backed rate limiting with
-brute-force protection. See [Roadmap](#roadmap).
+**Status:** Feature-complete for v1 (milestones 1–7 of 8): email/password auth with JWT
+issuing, rotating refresh tokens with reuse detection, permission-based access control,
+Google/GitHub sign-in with account linking, Redis-backed rate limiting with brute-force
+protection, and an OpenAPI contract with Swagger UI. TOTP 2FA is the remaining stretch
+goal. See [Roadmap](#roadmap).
+
+**Try it:** `docker compose up --build`, then open <http://localhost:3000/api/v1/docs>.
 
 ---
 
@@ -40,7 +43,7 @@ authentication logic out of controllers and response formatting out of services.
                                       │
                     ┌──────────────────────────────────────────┐
                     │ rate limit → validate → authenticate →   │  per-route guards
-                    │ authorize (RBAC)                         │  (milestones 2-6)
+                    │ authorize (RBAC)                         │
                     └──────────────────────────────────────────┘
                                       │
                     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
@@ -61,7 +64,7 @@ authentication logic out of controllers and response formatting out of services.
                     └──────────────────────────────────────────┘
 ```
 
-### Current auth flow
+### Auth flow
 
 ```
 REGISTER                                    LOGIN
@@ -153,12 +156,12 @@ src/
 ├── routes/       route definitions — which middleware guards which endpoint
 ├── controllers/  request → response translation only
 ├── services/     business logic; no knowledge of HTTP
-├── middleware/   error handler, async wrapper, validation, authenticate (RBAC to come)
+├── middleware/   error handler, async wrapper, validation, authenticate, authorize, rate limit
 ├── lib/          Prisma + Redis clients, logger, AppError, password hashing, JWT, cookies, mailer
 │   └── oauth/    provider registry and the authorization-code client
 ├── prisma/       schema.prisma + migrations
 ├── validators/   Zod request schemas
-├── docs/         OpenAPI document
+├── docs/         OpenAPI document (served as JSON and through Swagger UI)
 ├── types/        Express request augmentation (req.user)
 ├── scripts/      operator CLI (set-role)
 ├── generated/    Prisma client output (gitignored — regenerated from the schema)
@@ -230,8 +233,14 @@ npm run dev                     # tsx watch — restarts on file change
 Everything is mounted under `/api/v1` so a future breaking change can ship as `/api/v2`
 alongside it, instead of forcing every consumer to redeploy on the same day.
 
-The machine-readable contract is served at `GET /api/v1/openapi.json` — import it into
-Postman or Insomnia. Swagger UI is mounted on top of it in milestone 7.
+Interactive docs live at **`GET /api/v1/docs`** (Swagger UI). Log in through it, click
+**Authorize**, paste the `accessToken`, and every protected endpoint becomes callable from
+the page. The raw contract is at `GET /api/v1/openapi.json` for Postman, Insomnia or client
+generation.
+
+The spec is written by hand, so the real risk is drift. A test walks the live Express
+router and fails if any method + path pair is undocumented, or documented but no longer
+served ([`tests/integration/openapi.test.ts`](tests/integration/openapi.test.ts)).
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
@@ -254,6 +263,7 @@ Postman or Insomnia. Swagger UI is mounted on top of it in milestone 7.
 | `PATCH` | `/api/v1/users/:id/role` | `users:manage-roles` | Change a user's role. |
 | `DELETE` | `/api/v1/users/:id` | `users:delete` | Delete a user. |
 | `GET` | `/api/v1/openapi.json` | — | OpenAPI 3.1 description of everything above. |
+| `GET` | `/api/v1/docs` | — | Swagger UI over that document. |
 
 ### Walking the full flow
 
@@ -312,6 +322,55 @@ curl -s -b $JAR -X POST http://localhost:3000/api/v1/auth/refresh
 
 The server log carries one `Refresh token reuse detected` warning for the actual theft,
 and routine `Revoked refresh token presented` notices for the sessions the cascade cut.
+
+### Sessions and verification
+
+```bash
+# End this session only. Idempotent: logging out twice is still a 204.
+curl -s -b $JAR -c $JAR -X POST http://localhost:3000/api/v1/auth/logout -o /dev/null -w '%{http_code}\n'
+# => 204
+
+# Sign out every device. Needs a real access token, not just the cookie.
+curl -s -X POST http://localhost:3000/api/v1/auth/logout-all -H "Authorization: Bearer <ACCESS_TOKEN>"
+# => 200 {"sessionsRevoked":3}
+
+# Lost the verification email? Same answer whether or not the account exists.
+curl -s -X POST http://localhost:3000/api/v1/auth/resend-verification \
+  -H 'Content-Type: application/json' -d '{"email":"dev@example.com"}'
+# => 202 {"message":"If that account exists and is unverified, a new verification link has been sent."}
+
+# Which social providers are linked to my account?
+curl -s http://localhost:3000/api/v1/auth/oauth/linked -H "Authorization: Bearer <ACCESS_TOKEN>"
+# => 200 {"providers":["google"]}
+```
+
+### User management
+
+These need a verified account with the right permission; see
+[Creating the first admin](#creating-the-first-admin) to get one. Log in again after
+promoting yourself — the old access token still carries the old role.
+
+```bash
+ADMIN=<SUPERADMIN_ACCESS_TOKEN>
+
+# List users. limit is capped at 100 by the validator; offset pages through.
+curl -s "http://localhost:3000/api/v1/users?limit=2&offset=0" -H "Authorization: Bearer $ADMIN"
+# => 200 {"users":[{"id":"...","email":"dev@example.com","role":"USER",...}],"total":7,"limit":2,"offset":0}
+
+# Read one user. A plain USER may read only themselves; anyone else's id gets 403.
+curl -s http://localhost:3000/api/v1/users/<USER_ID> -H "Authorization: Bearer $ADMIN"
+# => 200 {"user":{"id":"<USER_ID>",...}}
+
+# Promote. Revokes the target's refresh tokens so the old role cannot be renewed.
+curl -s -X PATCH http://localhost:3000/api/v1/users/<USER_ID>/role \
+  -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -d '{"role":"ADMIN"}'
+# => 200 {"user":{"id":"<USER_ID>","role":"ADMIN",...}}
+
+# Delete. Refresh tokens cascade; the login audit trail is kept.
+curl -s -X DELETE http://localhost:3000/api/v1/users/<USER_ID> \
+  -H "Authorization: Bearer $ADMIN" -o /dev/null -w '%{http_code}\n'
+# => 204
+```
 
 ### Two deliberate deviations from the conventional REST answer
 
@@ -639,7 +698,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ---
 
-## Security posture (so far)
+## Security posture
 
 | Measure | Where |
 | --- | --- |
@@ -675,7 +734,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 | Request body size cap (100 kb) | [`src/app.ts`](src/app.ts) |
 | Framework fingerprint removed | `x-powered-by` disabled |
 | Config validated at boot, process exits if invalid | [`src/config/env.ts`](src/config/env.ts) |
-| Separate secrets for access vs refresh tokens | `.env.example` |
+| One signing secret only: refresh tokens are opaque and checked against the database, so there is no second key to leak | [`.env.example`](.env.example) |
 | Secrets redacted from logs at the logger, not per call site | [`src/lib/logger.ts`](src/lib/logger.ts) |
 | Internal error details hidden in production | [`src/middleware/error-handler.ts`](src/middleware/error-handler.ts) |
 | Container runs as non-root | [`Dockerfile`](Dockerfile) |
@@ -687,7 +746,7 @@ Three decisions worth calling out, since they are the parts an interviewer tends
 
 ```bash
 docker compose up -d postgres redis   # the suite needs real datastores
-npm test                              # 144 tests
+npm test                              # 145 tests
 ```
 
 Tests run against a real Postgres, not a mocked Prisma client, because the behaviour most
@@ -739,6 +798,10 @@ deterministic without faking away the logic worth testing.
   password, unknown emails locked identically, other accounts unaffected, and a locked
   request rejected before any Argon2 work happens
 
+- Docs: the OpenAPI document matches the live router method by method, in both
+  directions; Swagger UI is served without loosening the Content-Security-Policy for
+  inline scripts
+
 ---
 
 ## Roadmap
@@ -749,7 +812,7 @@ deterministic without faking away the logic worth testing.
 - [x] **4. RBAC** — permission middleware, protected user-management routes
 - [x] **5. OAuth2** — Google + GitHub, account linking
 - [x] **6. Rate limiting** — per-IP and per-account, brute-force protection
-- [ ] **7. Docs** — OpenAPI spec + auth flow diagram
+- [x] **7. Docs** — OpenAPI 3.1 spec, Swagger UI, drift test, auth flow and token lifecycle diagrams
 - [ ] **8. Stretch** — TOTP-based 2FA
 
 ---

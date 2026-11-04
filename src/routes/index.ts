@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import swaggerUi from 'swagger-ui-express';
 import { healthRouter } from './health.routes.js';
 import { authRouter } from './auth.routes.js';
 import { userRouter } from './user.routes.js';
@@ -18,9 +19,23 @@ apiRouter.use('/health', healthRouter);
 apiRouter.use('/auth', authRouter);
 apiRouter.use('/users', userRouter);
 
-// The machine-readable API contract. Served as plain JSON for now so it can be
-// imported into Postman or Insomnia; milestone 7 renders it with Swagger UI.
+// The machine-readable API contract, as plain JSON so it can be imported into
+// Postman or Insomnia, or used to generate a typed client.
 apiRouter.get('/openapi.json', (_req, res) => {
   res.status(200).json(openApiDocument);
 });
+
+// Swagger UI: an interactive page over the same document. The UI is told to
+// fetch /openapi.json rather than having the spec inlined into its page, so the
+// JSON endpoint stays the single source of truth -- and the page's script loads
+// as a same-origin file, which Helmet's default Content-Security-Policy allows
+// without loosening it for inline scripts.
+apiRouter.use(
+  '/docs',
+  swaggerUi.serve,
+  swaggerUi.setup(undefined, {
+    customSiteTitle: 'Auth Service API',
+    swaggerOptions: { url: '/api/v1/openapi.json' },
+  }),
+);
 

@@ -39,6 +39,7 @@
     "pino": "^10.3.1",
     "pino-http": "^11.0.0",
     "prisma": "^7.10.0",
+    "swagger-ui-express": "^5.0.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
@@ -49,6 +50,7 @@
     "@types/node": "^22.20.3",
     "@types/pg": "^8.23.1",
     "@types/supertest": "^7.2.1",
+    "@types/swagger-ui-express": "^4.1.8",
     "supertest": "^7.2.2",
     "tsx": "^4.23.13",
     "typescript": "^5.9.3",
